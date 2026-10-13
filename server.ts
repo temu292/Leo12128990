@@ -40,7 +40,7 @@ function writeDisconnectedAuthors(set: Set<string>): void {
     }
     fs.writeFileSync(
       PRESENCE_FILE_PATH,
-      JSON.stringify({ disconnectedAuthorIds: Array.from(set), updatedAt: new Date().toISOString() }, null, 2),
+      JSON.stringify({ disconnectedAuthorIds: Array.from(set), updatedAt: new Date().toISOString() }, null, 2) + '\n',
       'utf-8'
     );
   } catch (err) {
@@ -158,6 +158,51 @@ const serverServiceRoleKey =
     ? (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim()
     : '';
 
+let _serverAuthSupabase: SupabaseClient | null = null;
+let _serverAdminSupabase: SupabaseClient | null = null;
+
+export function getServerAuthSupabase(): SupabaseClient | null {
+  if (_serverAuthSupabase) return _serverAuthSupabase;
+  const url = (process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '').trim();
+  const anonKey = (
+    process.env.VITE_SUPABASE_ANON_KEY ||
+    process.env.SUPABASE_ANON_KEY ||
+    process.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
+    process.env.SUPABASE_PUBLISHABLE_KEY ||
+    ''
+  ).trim();
+  const serviceRoleKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
+  const key = anonKey || serviceRoleKey;
+  if (url && key) {
+    _serverAuthSupabase = createClient(url, key, {
+      auth: {
+        persistSession: false,
+        autoRefreshToken: false
+      }
+    });
+    return _serverAuthSupabase;
+  }
+  return null;
+}
+
+export function getServerAdminSupabase(): SupabaseClient | null {
+  if (_serverAdminSupabase && getServiceRoleKeyStatus() === 'configured') {
+    return _serverAdminSupabase;
+  }
+  const url = (process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '').trim();
+  const serviceRoleKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
+  if (url && getServiceRoleKeyStatus() === 'configured' && serviceRoleKey) {
+    _serverAdminSupabase = createClient(url, serviceRoleKey, {
+      auth: {
+        persistSession: false,
+        autoRefreshToken: false
+      }
+    });
+    return _serverAdminSupabase;
+  }
+  return null;
+}
+
 export const serverAuthSupabase: SupabaseClient | null =
   serverSupabaseUrl && (serverAnonKey || serverServiceRoleKey)
     ? createClient(serverSupabaseUrl, serverAnonKey || serverServiceRoleKey, {
@@ -198,13 +243,14 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
     return;
   }
 
-  if (!serverAuthSupabase) {
+  const authClient = getServerAuthSupabase() || serverAuthSupabase;
+  if (!authClient) {
     res.status(503).json({ error: 'Servicio de autenticación no configurado en el servidor.' });
     return;
   }
 
   try {
-    const { data: { user }, error } = await serverAuthSupabase.auth.getUser(token);
+    const { data: { user }, error } = await authClient.auth.getUser(token);
     if (error || !user) {
       res.status(401).json({ error: 'Token de sesión expirado o inválido.' });
       return;
@@ -302,15 +348,107 @@ export async function requireAdmin(req: Request, res: Response, next: NextFuncti
   next();
 }
 
+/**
+ * Helper to obtain dynamic PayPal configuration and credentials at runtime.
+ * Reads process.env and synchronizes with /app/.dev.env.json (AI Studio Secrets storage)
+ * on every request to ensure any changes in secrets or environment are immediately active.
+ */
+function getPayPalRuntime(): {
+  isConfigured: boolean;
+  clientId: string | null;
+  clientSecret: string | null;
+  environment: 'live' | 'sandbox';
+  apiBase: string;
+  diagnostics: {
+    clientIdConfigured: boolean;
+    clientSecretConfigured: boolean;
+    environment: 'live' | 'sandbox';
+    credentialsSource: 'process.env' | 'dev.env.json' | 'mixed' | 'none';
+    clientIdLength: number;
+    clientSecretLength: number;
+    status: 'ready' | 'missing_credentials' | 'missing_client_id' | 'missing_client_secret';
+    message: string;
+  };
+} {
+  let devEnv: Record<string, string> = {};
+  if (fs.existsSync('/app/.dev.env.json')) {
+    try {
+      devEnv = JSON.parse(fs.readFileSync('/app/.dev.env.json', 'utf8')) || {};
+    } catch {
+      devEnv = {};
+    }
+  }
+
+  const rawClientId = process.env.PAYPAL_CLIENT_ID || devEnv.PAYPAL_CLIENT_ID || '';
+  const rawClientSecret = process.env.PAYPAL_CLIENT_SECRET || devEnv.PAYPAL_CLIENT_SECRET || '';
+  const rawEnv = process.env.PAYPAL_ENVIRONMENT || devEnv.PAYPAL_ENVIRONMENT || '';
+
+  // Sanitize values (strip whitespace, newlines, and accidental quotes)
+  const sanitize = (val: string) => (typeof val === 'string' ? val.trim().replace(/^['"]|['"]$/g, '') : '');
+
+  const clientId = sanitize(rawClientId);
+  const clientSecret = sanitize(rawClientSecret);
+  const envVal = sanitize(rawEnv).toLowerCase();
+
+  const isLive = envVal === 'live' || envVal === 'production';
+  const environment: 'live' | 'sandbox' = isLive ? 'live' : 'sandbox';
+  const apiBase = isLive ? 'https://api-m.paypal.com' : 'https://api-m.sandbox.paypal.com';
+
+  const clientIdConfigured = Boolean(clientId && clientId.length > 5);
+  const clientSecretConfigured = Boolean(clientSecret && clientSecret.length > 5);
+  const isConfigured = clientIdConfigured && clientSecretConfigured;
+
+  let credentialsSource: 'process.env' | 'dev.env.json' | 'mixed' | 'none' = 'none';
+  const fromProc = Boolean(process.env.PAYPAL_CLIENT_ID && process.env.PAYPAL_CLIENT_SECRET);
+  const fromDev = Boolean(devEnv.PAYPAL_CLIENT_ID && devEnv.PAYPAL_CLIENT_SECRET);
+  if (fromProc && fromDev) credentialsSource = 'process.env';
+  else if (fromProc) credentialsSource = 'process.env';
+  else if (fromDev) credentialsSource = 'dev.env.json';
+  else if (clientIdConfigured || clientSecretConfigured) credentialsSource = 'mixed';
+
+  let status: 'ready' | 'missing_credentials' | 'missing_client_id' | 'missing_client_secret' = 'ready';
+  let message = '';
+
+  if (isConfigured) {
+    status = 'ready';
+    message = `Credenciales de PayPal operativas y conectadas en modo ${environment.toUpperCase()}.`;
+  } else if (!clientIdConfigured && !clientSecretConfigured) {
+    status = 'missing_credentials';
+    message = 'Credenciales ausentes: se requieren PAYPAL_CLIENT_ID y PAYPAL_CLIENT_SECRET en el servidor.';
+  } else if (!clientIdConfigured) {
+    status = 'missing_client_id';
+    message = 'Falta configurar PAYPAL_CLIENT_ID en el servidor.';
+  } else {
+    status = 'missing_client_secret';
+    message = 'Falta configurar PAYPAL_CLIENT_SECRET en el servidor.';
+  }
+
+  return {
+    isConfigured,
+    clientId: clientIdConfigured ? clientId : null,
+    clientSecret: clientSecretConfigured ? clientSecret : null,
+    environment,
+    apiBase,
+    diagnostics: {
+      clientIdConfigured,
+      clientSecretConfigured,
+      environment,
+      credentialsSource,
+      clientIdLength: clientId.length,
+      clientSecretLength: clientSecret.length,
+      status,
+      message
+    }
+  };
+}
+
 // 0. Health & Diagnostics endpoint (without exposing any secret values)
 app.get('/api/health', (_req: Request, res: Response) => {
   const hasSupabaseUrl = Boolean(process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL);
   const hasSupabaseAnonKey = Boolean(process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY);
   const serviceRoleKeyStatus = getServiceRoleKeyStatus();
   const hasServiceRoleKey = serviceRoleKeyStatus === 'configured';
-  const hasPaypalClientId = Boolean(process.env.PAYPAL_CLIENT_ID);
-  const hasPaypalClientSecret = Boolean(process.env.PAYPAL_CLIENT_SECRET);
-  const envType = (process.env.PAYPAL_ENVIRONMENT || '').trim().toLowerCase();
+  const ppRuntime = getPayPalRuntime();
 
   res.json({
     status: 'healthy',
@@ -322,9 +460,10 @@ app.get('/api/health', (_req: Request, res: Response) => {
       supabaseAnonKeyConfigured: hasSupabaseAnonKey,
       supabaseServiceRoleKeyConfigured: hasServiceRoleKey,
       supabaseServiceRoleKeyStatus: serviceRoleKeyStatus,
-      paypalClientIdConfigured: hasPaypalClientId,
-      paypalClientSecretConfigured: hasPaypalClientSecret,
-      paypalEnvironment: envType === 'live' ? 'live' : 'sandbox'
+      paypalClientIdConfigured: ppRuntime.diagnostics.clientIdConfigured,
+      paypalClientSecretConfigured: ppRuntime.diagnostics.clientSecretConfigured,
+      paypalEnvironment: ppRuntime.environment,
+      paypalStatus: ppRuntime.diagnostics.status
     }
   });
 });
@@ -596,25 +735,18 @@ const OFFICIAL_BOOST_PLANS: Record<string, { name: string; price: number; durati
 // In-memory set to prevent duplicate order captures (replay protection)
 const capturedOrderIds = new Set<string>();
 
-const rawEnv = (process.env.PAYPAL_ENVIRONMENT || '').trim().toLowerCase();
-const isLive = rawEnv === 'live' || rawEnv === 'production' || (rawEnv !== 'sandbox' && (process.env.PAYPAL_CLIENT_ID?.startsWith('BA') || rawEnv.length > 20));
-const PAYPAL_API_BASE = isLive
-  ? 'https://api-m.paypal.com'
-  : 'https://api-m.sandbox.paypal.com';
-
 /**
  * Helper to obtain PayPal OAuth2 access token securely using server-side credentials
  */
 async function getPayPalAccessToken(): Promise<string> {
-  const clientId = process.env.PAYPAL_CLIENT_ID;
-  const clientSecret = process.env.PAYPAL_CLIENT_SECRET;
+  const runtime = getPayPalRuntime();
 
-  if (!clientId || !clientSecret) {
+  if (!runtime.isConfigured || !runtime.clientId || !runtime.clientSecret) {
     throw new Error('MISSING_CREDENTIALS');
   }
 
-  const auth = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
-  const response = await fetch(`${PAYPAL_API_BASE}/v1/oauth2/token`, {
+  const auth = Buffer.from(`${runtime.clientId}:${runtime.clientSecret}`).toString('base64');
+  const response = await fetch(`${runtime.apiBase}/v1/oauth2/token`, {
     method: 'POST',
     headers: {
       'Authorization': `Basic ${auth}`,
@@ -625,11 +757,16 @@ async function getPayPalAccessToken(): Promise<string> {
 
   if (!response.ok) {
     const errorText = await response.text();
-    console.error('PayPal OAuth error:', response.status, errorText);
-    throw new Error(`PayPal auth failed with status ${response.status}`);
+    console.error(`[PayPal OAuth Error] Status: ${response.status}, Mode: ${runtime.environment}, Details:`, errorText);
+    if (response.status === 401) {
+      throw new Error(
+        `Error de autenticación con PayPal (401 en modo ${runtime.environment.toUpperCase()}): comprueba que tus credenciales correspondan al entorno configurado en PAYPAL_ENVIRONMENT.`
+      );
+    }
+    throw new Error(`PayPal auth failed with status ${response.status} in mode ${runtime.environment.toUpperCase()}`);
   }
 
-  const data = await response.json() as { access_token: string };
+  const data = (await response.json()) as { access_token: string };
   return data.access_token;
 }
 
@@ -637,8 +774,9 @@ async function getPayPalAccessToken(): Promise<string> {
  * Inspección del estado de la orden en PayPal (recuperación de cortes de red sin duplicar cobros)
  */
 async function getPayPalOrderDetails(orderId: string, accessToken: string): Promise<any | null> {
+  const runtime = getPayPalRuntime();
   try {
-    const res = await fetch(`${PAYPAL_API_BASE}/v2/checkout/orders/${orderId}`, {
+    const res = await fetch(`${runtime.apiBase}/v2/checkout/orders/${orderId}`, {
       method: 'GET',
       headers: {
         'Authorization': `Bearer ${accessToken}`,
@@ -655,18 +793,21 @@ async function getPayPalOrderDetails(orderId: string, accessToken: string): Prom
   }
 }
 
-// 1. Check PayPal server configuration status
+// 1. Check PayPal server configuration status (strict anti-cache headers & diagnostics)
 app.get('/api/paypal/config', (_req: Request, res: Response) => {
-  const hasClientId = Boolean(process.env.PAYPAL_CLIENT_ID);
-  const hasClientSecret = Boolean(process.env.PAYPAL_CLIENT_SECRET);
-  const isConfigured = hasClientId && hasClientSecret;
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+
+  const runtime = getPayPalRuntime();
 
   res.json({
-    configured: isConfigured,
-    clientId: hasClientId ? process.env.PAYPAL_CLIENT_ID : null,
-    environment: isLive ? 'live' : 'sandbox',
+    configured: runtime.isConfigured,
+    clientId: runtime.clientId,
+    environment: runtime.environment,
     currency: 'EUR',
-    officialPlans: OFFICIAL_BOOST_PLANS
+    officialPlans: OFFICIAL_BOOST_PLANS,
+    diagnostics: runtime.diagnostics
   });
 });
 
@@ -679,7 +820,8 @@ app.post('/api/paypal/create-order', requireAuth, async (req: Request, res: Resp
       return;
     }
 
-    if (!serverAdminSupabase || getServiceRoleKeyStatus() !== 'configured') {
+    const adminClient = getServerAdminSupabase() || serverAdminSupabase;
+    if (!adminClient || getServiceRoleKeyStatus() !== 'configured') {
       res.status(503).json({
         error:
           'Las promociones de pago no están disponibles temporalmente: falta configurar SUPABASE_SERVICE_ROLE_KEY en el servidor para verificar y activar anuncios.'
@@ -712,7 +854,7 @@ app.post('/api/paypal/create-order', requireAuth, async (req: Request, res: Resp
     }
 
     // Verify in Supabase that the service exists, belongs to authUser.id, and is 'active'
-    const { data: srvRow, error: srvError } = await serverAdminSupabase
+    const { data: srvRow, error: srvError } = await adminClient
       .from('services')
       .select('id, author_id, status, title')
       .eq('id', normalizedServiceId)
@@ -773,7 +915,8 @@ app.post('/api/paypal/create-order', requireAuth, async (req: Request, res: Resp
       }
     };
 
-    const orderResponse = await fetch(`${PAYPAL_API_BASE}/v2/checkout/orders`, {
+    const runtime = getPayPalRuntime();
+    const orderResponse = await fetch(`${runtime.apiBase}/v2/checkout/orders`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${accessToken}`,
@@ -787,7 +930,7 @@ app.post('/api/paypal/create-order', requireAuth, async (req: Request, res: Resp
     if (!orderResponse.ok || !orderData.id) {
       console.error('PayPal create order failure:', orderData);
       res.status(orderResponse.status || 500).json({
-        error: orderData.message || 'Error al crear la orden en PayPal Sandbox.'
+        error: orderData.message || (runtime.environment === 'live' ? 'Error al crear la orden en PayPal.' : 'Error al crear la orden en PayPal Sandbox.')
       });
       return;
     }
@@ -815,9 +958,10 @@ app.post('/api/paypal/create-order', requireAuth, async (req: Request, res: Resp
       currency: 'EUR'
     });
   } catch (error: any) {
+    const runtime = getPayPalRuntime();
     if (error.message === 'MISSING_CREDENTIALS') {
       res.status(503).json({
-        error: 'Las credenciales de PayPal Sandbox no están configuradas en el servidor.'
+        error: runtime.environment === 'live' ? 'Las credenciales de PayPal LIVE no están configuradas en el servidor.' : 'Las credenciales de PayPal Sandbox no están configuradas en el servidor.'
       });
       return;
     }
@@ -976,8 +1120,9 @@ app.post('/api/paypal/capture-order', requireAuth, async (req: Request, res: Res
     }
 
     let captureResponse: globalThis.Response;
+    const runtime = getPayPalRuntime();
     try {
-      captureResponse = await fetch(`${PAYPAL_API_BASE}/v2/checkout/orders/${orderId}/capture`, {
+      captureResponse = await fetch(`${runtime.apiBase}/v2/checkout/orders/${orderId}/capture`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${accessToken}`,
@@ -1148,9 +1293,13 @@ app.post('/api/paypal/capture-order', requireAuth, async (req: Request, res: Res
       supabaseSyncStatus: capturedOrder.supabaseSyncStatus
     });
   } catch (error: any) {
+    const runtime = getPayPalRuntime();
     if (error.message === 'MISSING_CREDENTIALS') {
       res.status(503).json({
-        error: 'Credenciales de PayPal Sandbox no configuradas en el servidor.'
+        error:
+          runtime.environment === 'live'
+            ? 'Credenciales de PayPal LIVE no configuradas en el servidor.'
+            : 'Credenciales de PayPal Sandbox no configuradas en el servidor.'
       });
       return;
     }

@@ -55,7 +55,7 @@ function persistToDisk() {
   try {
     const list = Array.from(memoryCache.values());
     const tempFile = `${JOURNAL_FILE}.tmp.${Date.now()}`;
-    fs.writeFileSync(tempFile, JSON.stringify(list, null, 2), 'utf-8');
+    fs.writeFileSync(tempFile, JSON.stringify(list, null, 2) + '\n', 'utf-8');
     fs.renameSync(tempFile, JOURNAL_FILE);
   } catch (err) {
     console.error('[PayPal Journal] Failed to persist data to disk:', err);

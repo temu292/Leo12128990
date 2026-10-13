@@ -19,8 +19,8 @@ import {
 
 interface HeaderProps {
   currentUser: User;
-  allUsers: User[];
-  onSelectUser: (user: User) => void;
+  allUsers?: User[];
+  onSelectUser?: (user: User) => void;
   favoritesCount: number;
   onOpenFavorites: () => void;
   onOpenPublish: () => void;
@@ -35,8 +35,8 @@ interface HeaderProps {
 
 export const Header: React.FC<HeaderProps> = ({
   currentUser,
-  allUsers,
-  onSelectUser,
+  allUsers = [],
+  onSelectUser = () => {},
   favoritesCount,
   onOpenFavorites,
   onOpenPublish,
@@ -253,43 +253,47 @@ export const Header: React.FC<HeaderProps> = ({
                         </div>
                       </div>
 
-                      <div className="px-3 py-1">
-                        <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
-                          Cambiar persona de prueba (Solo lectura)
-                        </p>
-                      </div>
-
-                      {allUsers.map(user => (
-                        <button
-                          key={user.id}
-                          onClick={() => {
-                            onSelectUser(user);
-                            setUserDropdownOpen(false);
-                          }}
-                          className={`w-full flex items-center gap-3 px-3 py-1.5 rounded-lg text-left text-xs transition-colors ${
-                            currentUser.id === user.id
-                              ? 'bg-[#E5F3EF] text-[#0E5145] font-semibold'
-                              : 'hover:bg-slate-50 text-slate-700'
-                          }`}
-                        >
-                          <img
-                            src={user.avatar}
-                            alt={user.name}
-                            className="w-6 h-6 rounded-full object-cover"
-                          />
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-1.5">
-                              <p className="truncate font-medium">{user.name}</p>
-                              {user.role === 'admin' && (
-                                <span className="text-[9px] bg-amber-100 text-amber-800 px-1 py-0.2 rounded font-bold">
-                                  Admin
-                                </span>
-                              )}
-                            </div>
-                            <p className="text-[10px] text-slate-400 truncate">{user.neighborhood}</p>
+                      {allUsers.length > 0 && (
+                        <>
+                          <div className="px-3 py-1">
+                            <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
+                              Cambiar persona de prueba (Solo lectura)
+                            </p>
                           </div>
-                        </button>
-                      ))}
+
+                          {allUsers.map(user => (
+                            <button
+                              key={user.id}
+                              onClick={() => {
+                                onSelectUser(user);
+                                setUserDropdownOpen(false);
+                              }}
+                              className={`w-full flex items-center gap-3 px-3 py-1.5 rounded-lg text-left text-xs transition-colors ${
+                                currentUser.id === user.id
+                                  ? 'bg-[#E5F3EF] text-[#0E5145] font-semibold'
+                                  : 'hover:bg-slate-50 text-slate-700'
+                              }`}
+                            >
+                              <img
+                                src={user.avatar}
+                                alt={user.name}
+                                className="w-6 h-6 rounded-full object-cover"
+                              />
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-1.5">
+                                  <p className="truncate font-medium">{user.name}</p>
+                                  {user.role === 'admin' && (
+                                    <span className="text-[9px] bg-amber-100 text-amber-800 px-1 py-0.2 rounded font-bold">
+                                      Admin
+                                    </span>
+                                  )}
+                                </div>
+                                <p className="text-[10px] text-slate-400 truncate">{user.neighborhood}</p>
+                              </div>
+                            </button>
+                          ))}
+                        </>
+                      )}
 
                       <div className="pt-2 mt-2 border-t border-slate-100">
                         <button

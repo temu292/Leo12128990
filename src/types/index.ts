@@ -103,7 +103,7 @@ export interface PaymentTransaction {
   createdAt: string;
   expiresAt: string;
   referenceCode: string;
-  provider: 'stripe_gateway' | 'redsys_gateway' | 'simulated_secure';
+  provider: 'stripe_gateway' | 'redsys_gateway' | 'simulated_secure' | 'paypal' | 'paypal_checkout';
 }
 
 export interface ReportItem {

@@ -30,11 +30,23 @@ interface PromoteServiceModalProps {
   onOpenAuth?: (tab?: 'login' | 'register') => void;
 }
 
+interface PayPalDiagnostics {
+  clientIdConfigured: boolean;
+  clientSecretConfigured: boolean;
+  environment: 'live' | 'sandbox';
+  credentialsSource: string;
+  clientIdLength: number;
+  clientSecretLength: number;
+  status: 'ready' | 'missing_credentials' | 'missing_client_id' | 'missing_client_secret';
+  message: string;
+}
+
 interface PayPalConfig {
   configured: boolean;
   clientId: string | null;
   environment: string;
   currency: string;
+  diagnostics?: PayPalDiagnostics;
 }
 
 declare global {
@@ -105,15 +117,51 @@ export const PromoteServiceModal: React.FC<PromoteServiceModalProps> = ({
   const checkServerConfig = async () => {
     setIsLoadingConfig(true);
     try {
-      const res = await fetch('/api/paypal/config');
+      const res = await fetch(`/api/paypal/config?_t=${Date.now()}`, {
+        cache: 'no-store',
+        headers: {
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Pragma': 'no-cache'
+        }
+      });
       if (res.ok) {
         const data = await res.json();
         setPaypalConfig(data);
       } else {
-        setPaypalConfig({ configured: false, clientId: null, environment: 'sandbox', currency: 'EUR' });
+        setPaypalConfig({
+          configured: false,
+          clientId: null,
+          environment: 'sandbox',
+          currency: 'EUR',
+          diagnostics: {
+            clientIdConfigured: false,
+            clientSecretConfigured: false,
+            environment: 'sandbox',
+            credentialsSource: 'none',
+            clientIdLength: 0,
+            clientSecretLength: 0,
+            status: 'missing_credentials',
+            message: `El servidor devolvió un error (código HTTP ${res.status}) al consultar la configuración de PayPal.`
+          }
+        });
       }
-    } catch {
-      setPaypalConfig({ configured: false, clientId: null, environment: 'sandbox', currency: 'EUR' });
+    } catch (err: any) {
+      setPaypalConfig({
+        configured: false,
+        clientId: null,
+        environment: 'sandbox',
+        currency: 'EUR',
+        diagnostics: {
+          clientIdConfigured: false,
+          clientSecretConfigured: false,
+          environment: 'sandbox',
+          credentialsSource: 'none',
+          clientIdLength: 0,
+          clientSecretLength: 0,
+          status: 'missing_credentials',
+          message: err?.message || 'Error de conexión de red con el endpoint /api/paypal/config del servidor.'
+        }
+      });
     } finally {
       setIsLoadingConfig(false);
     }
@@ -225,7 +273,7 @@ export const PromoteServiceModal: React.FC<PromoteServiceModalProps> = ({
                 createdAt: result.createdAt || new Date().toISOString(),
                 expiresAt: result.expiresAt,
                 referenceCode: `PAYPAL-${data.orderID.slice(-8)}`,
-                provider: 'stripe_gateway' // stored transaction format
+                provider: 'paypal'
               };
 
               setLastTx(tx);
@@ -425,7 +473,7 @@ export const PromoteServiceModal: React.FC<PromoteServiceModalProps> = ({
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2 font-bold text-slate-800">
                     <ShieldCheck className="w-4 h-4 text-[#146C5B]" />
-                    <span>Pasarela de cobro PayPal Sandbox (Backend Seguro)</span>
+                    <span>{paypalConfig?.environment === 'live' ? 'Pasarela Oficial PayPal LIVE (Backend Seguro)' : 'Pasarela de cobro PayPal Sandbox (Backend Seguro)'}</span>
                   </div>
                   <button
                     onClick={checkServerConfig}
@@ -487,8 +535,15 @@ export const PromoteServiceModal: React.FC<PromoteServiceModalProps> = ({
                 </div>
               )}
 
-              {/* Auth Verification Guard for Payments */}
-              {!isRealAuthenticatedUser ? (
+              {/* Auth Verification Guard & Server PayPal Config */}
+              {isLoadingConfig ? (
+                <div className="p-8 bg-slate-50 border border-slate-200 rounded-xl flex flex-col items-center justify-center text-center space-y-2.5">
+                  <RefreshCw className="w-6 h-6 text-[#146C5B] animate-spin" />
+                  <p className="text-xs font-semibold text-slate-700">
+                    Comprobando estado de credenciales de PayPal en el servidor...
+                  </p>
+                </div>
+              ) : !isRealAuthenticatedUser ? (
                 <div className="p-4 bg-amber-50 border border-amber-200 rounded-xl space-y-3 text-xs text-amber-950">
                   <div className="flex items-start gap-2.5">
                     <AlertCircle className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
@@ -569,10 +624,28 @@ export const PromoteServiceModal: React.FC<PromoteServiceModalProps> = ({
                         Credenciales de PayPal requeridas en el servidor
                       </h5>
                       <p className="leading-relaxed">
-                        El servidor Express (<code>/server.ts</code>) está listo para procesar pagos tanto en <strong>Sandbox (pruebas)</strong> como en <strong>LIVE (real)</strong>.
+                        {paypalConfig?.diagnostics?.message ||
+                          'El servidor Express (/server.ts) está listo para procesar pagos tanto en Sandbox (pruebas) como en LIVE (real).'}
                       </p>
                     </div>
                   </div>
+
+                  {paypalConfig?.diagnostics && (
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 py-1">
+                      <div className={`p-2.5 rounded-lg border text-[11px] ${paypalConfig.diagnostics.clientIdConfigured ? 'bg-emerald-50 border-emerald-200 text-emerald-900' : 'bg-red-50 border-red-200 text-red-900'}`}>
+                        <span className="font-mono font-bold block">PAYPAL_CLIENT_ID</span>
+                        <span className="font-semibold">{paypalConfig.diagnostics.clientIdConfigured ? '✓ Configurado' : '✗ Ausente'}</span>
+                      </div>
+                      <div className={`p-2.5 rounded-lg border text-[11px] ${paypalConfig.diagnostics.clientSecretConfigured ? 'bg-emerald-50 border-emerald-200 text-emerald-900' : 'bg-red-50 border-red-200 text-red-900'}`}>
+                        <span className="font-mono font-bold block">PAYPAL_CLIENT_SECRET</span>
+                        <span className="font-semibold">{paypalConfig.diagnostics.clientSecretConfigured ? '✓ Configurado' : '✗ Ausente'}</span>
+                      </div>
+                      <div className="p-2.5 rounded-lg border bg-white border-amber-200 text-amber-900 text-[11px]">
+                        <span className="font-mono font-bold block">PAYPAL_ENVIRONMENT</span>
+                        <span className="font-semibold uppercase">{paypalConfig.diagnostics.environment}</span>
+                      </div>
+                    </div>
+                  )}
 
                   <div className="bg-white/80 p-3 rounded-lg border border-amber-200/80 space-y-2 font-sans">
                     <p className="font-bold text-slate-900">Pasos para activar en tu proyecto:</p>
